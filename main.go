@@ -1,13 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
-	"log"
-	"path"
-
+	"html/template"
+	"image"
+	"image/png"
 	"io/ioutil"
+	"log"
 	"math"
 	"math/rand"
+	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/davvo/mercator"
 	"github.com/fogleman/gg"
@@ -20,68 +25,91 @@ type Color struct {
 	blue  float64
 }
 
+const WIDTH, HEIGHT = 256, 256
+const FILE_PATH = "areas.geojson"
+
+var cache map[string][]byte
 var colors []Color
 
-const WIDTH, HEIGHT = 256, 256
-
 func main() {
-	var err error
-	colors, err = formColors("areas.geojson")
-	handleError(err)
+	cache = make(map[string][]byte, 0)
+	colors = formColors(FILE_PATH)
 
-	z, x, y, err := input()
-	handleError(err)
-	handleError(DrawMap(z, x, y, "areas.geojson"))
+	http.Handle("/assets/", http.StripPrefix("/assets/", http.FileServer(http.Dir("./assets/"))))
+	http.HandleFunc("/", indexHandler)
+	http.HandleFunc("/tile/", drawTile)
+
+	http.ListenAndServe(":3000", nil)
 }
 
-func formColors(filePath string) (colors []Color, err error) {
+func formColors(filePath string) []Color {
 	var coordinates [][][][][]float64
 	var featureCollectionJSON []byte
 
-	featureCollectionJSON, err = ioutil.ReadFile(filePath)
+	featureCollectionJSON, err := ioutil.ReadFile(filePath)
 	if err != nil {
-		return nil, err
+		fmt.Println(err.Error())
 	}
 
 	coordinates, err = getMultyCoordinates(featureCollectionJSON)
 	if err != nil {
-		return nil, err
+		fmt.Println(err.Error())
 	}
 
-	colors = make([]Color, len(coordinates))
+	colors := make([]Color, len(coordinates))
 	for i := 0; i < len(coordinates); i++ {
 		colors[i] = Color{red: rand.Float64(), green: rand.Float64(), blue: rand.Float64()}
 	}
 
-	return colors, nil
+	return colors
 }
 
-//DrawMap is the method to draw a map
-func DrawMap(z, x, y float64, filePath string) error {
+func indexHandler(w http.ResponseWriter, r *http.Request) {
+	t, err := template.ParseFiles("./index.html")
+	if err != nil {
+		fmt.Fprintf(w, err.Error())
+	}
+
+	err = t.ExecuteTemplate(w, "index", "hello")
+	if err != nil {
+		fmt.Fprintf(w, err.Error())
+	}
+}
+
+func drawTile(w http.ResponseWriter, r *http.Request) {
 	var err error
-	var img string
+
+	key := r.URL.String()
+	keys := strings.Split(key, "/")
+
+	z, err := strconv.ParseFloat(keys[2], 64)
+	x, err := strconv.ParseFloat(keys[3], 64)
+	y, err := strconv.ParseFloat(keys[4], 64)
+
+	var img image.Image
+	var imgBytes []byte
 
 	var featureCollectionJSON []byte
+	var filePath = FILE_PATH
 
-	if featureCollectionJSON, err = ioutil.ReadFile(filePath); err != nil {
-		return err
+	if cache[key] != nil {
+		imgBytes = cache[key]
+	} else {
+		if featureCollectionJSON, err = ioutil.ReadFile(filePath); err != nil {
+			fmt.Println(err.Error())
+		}
+
+		if img, err = getPNG(featureCollectionJSON, z, x, y); err != nil {
+			fmt.Println(err.Error())
+		}
+
+		buffer := new(bytes.Buffer) //buffer - *bytes.Buffer
+		png.Encode(buffer, img)     //img - image.Image
+		imgBytes = buffer.Bytes()
+		cache[key] = imgBytes
 	}
 
-	if img, err = getPNG(featureCollectionJSON, z, x, y); err != nil {
-		println(img)
-		return err
-	}
-
-	println(img)
-	return nil
-}
-
-func input() (z float64, x float64, y float64, err error) {
-	_, err = fmt.Scan(&z, &x, &y)
-	if err != nil {
-		return 0.0, 0.0, 0.0, err
-	}
-	return z, x, y, nil
+	w.Write(imgBytes)
 }
 
 func handleError(err error) {
@@ -90,12 +118,12 @@ func handleError(err error) {
 	}
 }
 
-func getPNG(featureCollectionJSON []byte, z float64, x float64, y float64) (string, error) {
+func getPNG(featureCollectionJSON []byte, z float64, x float64, y float64) (image.Image, error) {
 	var coordinates [][][][][]float64
 	var err error
 
 	if coordinates, err = getMultyCoordinates(featureCollectionJSON); err != nil {
-		return err.Error(), err
+		return nil, err
 	}
 
 	dc := gg.NewContext(WIDTH, HEIGHT)
@@ -113,13 +141,7 @@ func getPNG(featureCollectionJSON []byte, z float64, x float64, y float64) (stri
 		drawByPolygonCoordinates(dc, polygonCoordinates, scale, dc.Stroke, z, x, y)
 	})
 
-	fileName := fmt.Sprintf("%.0f%.0f%.0f.png", z, x, y)
-	var out = path.Join("Tiles", fileName)
-
-	err = dc.SavePNG(out)
-	if err != nil {
-		return "", err
-	}
+	out := dc.Image()
 
 	return out, nil
 }
